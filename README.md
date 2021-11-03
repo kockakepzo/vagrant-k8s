@@ -1,4 +1,4 @@
-Vagrant alapú K8A környezet telepítése
+Vagrant alapú K8S környezet telepítése
 ---
 Első lépésként töltsük le tetszőleges módon - git clone, wget, stb - Vagrantfile-t és a scripts könyvtárat a rendszerünkre, egy különálló könyvtárba, pl hwsw-k8s.
 
