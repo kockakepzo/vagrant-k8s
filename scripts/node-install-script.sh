@@ -1,31 +1,22 @@
 #!/bin/sh
 
-# Source: http://kubernetes.io/docs/getting-started-guides/kubeadm
+# loosly based on https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
 
-# Based on https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
-K8S_VERSION=1.22.2
+K8S_VERSION=1.30.2
 NODENAME=$(hostname -s)
 
-#start installing system tools
+#not on production systems
+sudo ufw disable
+
+#start update and installing requisite tools
 sudo apt -y update
-sudo apt -y upgrade
-sudo apt install -y curl apt-transport-https bash-completion binutils ca-certificates gnupg lsb-release
+sudo apt -y full-upgrade
+sudo apt install systemd-timesyncd
+sudo timedatectl set-ntp true
 
-
-curl -sSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
-
+#turn off swap
 sudo swapoff -a
-sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-
-sudo apt -y update
-sudo apt -y upgrade
-sudo apt install -y docker.io containerd kubelet=${K8S_VERSION}-00 kubeadm=${K8S_VERSION}-00 kubectl=${K8S_VERSION}-00
-sudo apt-mark hold kubelet kubeadm kubectl
-
-# Load required kernel modules
-sudo modprobe overlay
-sudo modprobe br_netfilter
+sudo sed -i '/swap/s/^\(.*\)$/#\1/g' /etc/fstab
 
 #Load the kernel modules at every boot
 cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
@@ -33,8 +24,49 @@ overlay
 br_netfilter
 EOF
 
+# Load required kernel modules
+sudo modprobe overlay
+sudo modprobe br_netfilter
 
-# Setting up sysctl
+#installing the packages to be able to install others, some of them are already installed. But it's better be safe than sorry.
+sudo apt install -y curl apt-transport-https ca-certificates binutils gpg gnupg2 software-properties-common lsb-release
+
+
+#add docker containerd repo
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+#install containerd
+sudo apt update && sudo apt install -y containerd.io
+
+#containerd setup, make sure the directory exists
+sudo mkdir -p /etc/containerd
+
+#create containerd default config, suitable for K8S, change the CGroup setting
+sudo containerd config default|sudo tee /etc/containerd/config.toml
+sudo sed 's/SystemdCgroup = false/SystemdCgroup = true/g' -i /etc/containerd/config.toml
+
+sudo systemctl restart containerd
+
+
+
+#add K8S install repo
+sudo curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+#installing base K8S packages
+sudo apt -y update
+sudo apt install -y kubelet kubeadm kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+
+#setting crictl to use containerd otherwise crictl complains
+cat <<EOF | sudo tee /etc/crictl.yaml
+runtime-endpoint: unix:///run/containerd/containerd.sock
+EOF
+
+# Setting up sysctl for k8s
 sudo tee /etc/sysctl.d/kubernetes.conf<<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
@@ -44,71 +76,34 @@ EOF
 #Load the sysctl settings
 sudo sysctl --system
 
-#containerd setup
-sudo mkdir -p /etc/containerd
-
-### containerd config
-sudo cat > /etc/containerd/config.toml <<EOF
-disabled_plugins = []
-imports = []
-oom_score = 0
-plugin_dir = ""
-required_plugins = []
-root = "/var/lib/containerd"
-state = "/run/containerd"
-version = 2
-
-[plugins]
-
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
-    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-      base_runtime_spec = ""
-      container_annotations = []
-      pod_annotations = []
-      privileged_without_host_devices = false
-      runtime_engine = ""
-      runtime_root = ""
-      runtime_type = "io.containerd.runc.v2"
-
-      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-        BinaryName = ""
-        CriuImagePath = ""
-        CriuPath = ""
-        CriuWorkPath = ""
-        IoGid = 0
-        IoUid = 0
-        NoNewKeyring = false
-        NoPivotRoot = false
-        Root = ""
-        ShimCgroup = ""
-        SystemdCgroup = true
-EOF
-
-
-
-
-#setting crictl to use containerd
-cat <<EOF | sudo tee /etc/crictl.yaml
-runtime-endpoint: unix:///run/containerd/containerd.sock
-EOF
-
-
 #setting kubelet to use containerd
-cat <<EOF | sudo tee /etc/default/kubelet
-KUBELET_EXTRA_ARGS="--container-runtime remote --container-runtime-endpoint unix:///run/containerd/containerd.sock"
-EOF
+
+#cat <<EOF | sudo tee /etc/default/kubelet
+#KUBELET_EXTRA_ARGS="--container-runtime remote --container-runtime-endpoint unix:///run/containerd/containerd.sock"
+#EOF
 
 #starting up the services
 sudo systemctl daemon-reload
-sudo systemctl enable containerd
-sudo systemctl restart containerd
+sudo systemctl enable kubelet
+
+#cleaning up the previous system remnants if there was any
+sudo kubeadm reset -f
+sudo rm /root/.kube/config
+
+config_path="/vagrant/configs"
+
+if [ -d $config_path ]; then
+   rm -f $config_path/*
+else
+   mkdir -p /vagrant/configs
+fi
+
+#starting up the services
+sudo systemctl daemon-reload
 sudo systemctl enable kubelet --now
 
-
-#start kubelet
-sudo systemctl daemon-reload
-sudo service kubelet restart
-sudo /bin/bash /vagrant/configs/join.sh -v
+#joint the worker node to the controller node
+sudo /bin/bash /vagrant/configs/join.sh
 
 sudo -i -u vagrant bash << EOF
 mkdir -p /home/vagrant/.kube
